@@ -1,0 +1,226 @@
+asyncapi: 3.0.0
+info:
+  title: Ticket Platform - Payment Events
+  version: 1.0.0
+  description: |
+    Контракт асинхронных сообщений RabbitMQ: Payment Service отправляет
+    проверенные события платежей и возвратов, Order Service потребляет их
+    для продолжения или компенсации Saga. Доставка at-least-once:
+    событие может быть повторено; получатель применяет inbox по event_id.
+    Внешние организаторы по этому контракту в RabbitMQ не подключаются.
+defaultContentType: application/json
+servers:
+  development:
+    host: rabbitmq:5672
+    protocol: amqp
+    protocolVersion: '0.9.1'
+    description: RabbitMQ в Docker Compose; учётные данные в переменных окружения
+channels:
+  paymentSucceeded:
+    address: payment.succeeded.v1
+    description: Подтверждённое единственное списание по заказу
+    messages:
+      paymentSucceeded:
+        $ref: '#/components/messages/PaymentSucceeded'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: ticket.payment.events
+          type: topic
+          durable: true
+          autoDelete: false
+        bindingVersion: '0.3.0'
+  paymentFailed:
+    address: payment.failed.v1
+    description: Окончательный отказ провайдера; неизвестный результат не является отказом
+    messages:
+      paymentFailed:
+        $ref: '#/components/messages/PaymentFailed'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: ticket.payment.events
+          type: topic
+          durable: true
+          autoDelete: false
+        bindingVersion: '0.3.0'
+  refundSucceeded:
+    address: refund.succeeded.v1
+    description: Провайдер подтвердил полный возврат
+    messages:
+      refundSucceeded:
+        $ref: '#/components/messages/RefundSucceeded'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: ticket.payment.events
+          type: topic
+          durable: true
+          autoDelete: false
+        bindingVersion: '0.3.0'
+  refundFailed:
+    address: refund.failed.v1
+    description: Подтверждённый отказ возврата, требующий сверки/эскалации
+    messages:
+      refundFailed:
+        $ref: '#/components/messages/RefundFailed'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: ticket.payment.events
+          type: topic
+          durable: true
+          autoDelete: false
+        bindingVersion: '0.3.0'
+operations:
+  paymentServiceSendPaymentSucceeded:
+    action: send
+    summary: Payment Service публикует PaymentSucceeded из transactional outbox
+    channel: { $ref: '#/channels/paymentSucceeded' }
+    messages: [{ $ref: '#/channels/paymentSucceeded/messages/paymentSucceeded' }]
+  orderServiceReceivePaymentSucceeded:
+    action: receive
+    summary: Order Service фиксирует факт оплаты и подтверждает все брони
+    channel: { $ref: '#/channels/paymentSucceeded' }
+    messages: [{ $ref: '#/channels/paymentSucceeded/messages/paymentSucceeded' }]
+  paymentServiceSendPaymentFailed:
+    action: send
+    summary: Payment Service публикует только окончательный отказ оплаты
+    channel: { $ref: '#/channels/paymentFailed' }
+    messages: [{ $ref: '#/channels/paymentFailed/messages/paymentFailed' }]
+  orderServiceReceivePaymentFailed:
+    action: receive
+    summary: Order Service начинает компенсацию временных броней
+    channel: { $ref: '#/channels/paymentFailed' }
+    messages: [{ $ref: '#/channels/paymentFailed/messages/paymentFailed' }]
+  paymentServiceSendRefundSucceeded:
+    action: send
+    summary: Payment Service подтверждает завершённый возврат
+    channel: { $ref: '#/channels/refundSucceeded' }
+    messages: [{ $ref: '#/channels/refundSucceeded/messages/refundSucceeded' }]
+  orderServiceReceiveRefundSucceeded:
+    action: receive
+    summary: Order Service закрывает денежный шаг компенсации
+    channel: { $ref: '#/channels/refundSucceeded' }
+    messages: [{ $ref: '#/channels/refundSucceeded/messages/refundSucceeded' }]
+  paymentServiceSendRefundFailed:
+    action: send
+    summary: Payment Service сообщает окончательный отказ возврата
+    channel: { $ref: '#/channels/refundFailed' }
+    messages: [{ $ref: '#/channels/refundFailed/messages/refundFailed' }]
+  orderServiceReceiveRefundFailed:
+    action: receive
+    summary: Order Service оставляет компенсацию незавершённой и запускает сверку
+    channel: { $ref: '#/channels/refundFailed' }
+    messages: [{ $ref: '#/channels/refundFailed/messages/refundFailed' }]
+components:
+  messages:
+    PaymentSucceeded:
+      name: PaymentSucceeded
+      title: Успешная оплата
+      contentType: application/json
+      correlationId:
+        location: '$message.payload#/correlation_id'
+      payload:
+        $ref: '#/components/schemas/PaymentSucceededPayload'
+    PaymentFailed:
+      name: PaymentFailed
+      title: Окончательный отказ оплаты
+      contentType: application/json
+      correlationId:
+        location: '$message.payload#/correlation_id'
+      payload:
+        $ref: '#/components/schemas/PaymentFailedPayload'
+    RefundSucceeded:
+      name: RefundSucceeded
+      title: Успешный возврат
+      contentType: application/json
+      correlationId:
+        location: '$message.payload#/correlation_id'
+      payload:
+        $ref: '#/components/schemas/RefundSucceededPayload'
+    RefundFailed:
+      name: RefundFailed
+      title: Подтверждённый отказ возврата
+      contentType: application/json
+      correlationId:
+        location: '$message.payload#/correlation_id'
+      payload:
+        $ref: '#/components/schemas/RefundFailedPayload'
+  schemas:
+    EventMetadata:
+      type: object
+      required: [event_id, event_type, event_version, occurred_at, correlation_id, order_id]
+      properties:
+        event_id: { type: string, format: uuid }
+        event_type: { type: string }
+        event_version: { type: integer, const: 1 }
+        occurred_at: { type: string, format: date-time }
+        correlation_id: { type: string, format: uuid }
+        order_id: { type: string, format: uuid }
+    PaymentDetails:
+      type: object
+      required: [payment_id, payment_operation_id, amount_minor, currency]
+      properties:
+        payment_id: { type: string, format: uuid }
+        payment_operation_id: { type: string, format: uuid }
+        provider_charge_id: { type: string }
+        amount_minor: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, enum: [RUB] }
+    RefundDetails:
+      type: object
+      required: [payment_id, refund_id, refund_operation_id, amount_minor, currency]
+      properties:
+        payment_id: { type: string, format: uuid }
+        refund_id: { type: string, format: uuid }
+        refund_operation_id: { type: string, format: uuid }
+        amount_minor: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, enum: [RUB] }
+    PaymentSucceededPayload:
+      allOf:
+        - $ref: '#/components/schemas/EventMetadata'
+        - type: object
+          required: [data]
+          properties:
+            event_type: { type: string, const: PaymentSucceeded }
+            data: { $ref: '#/components/schemas/PaymentDetails' }
+    PaymentFailedPayload:
+      allOf:
+        - $ref: '#/components/schemas/EventMetadata'
+        - type: object
+          required: [data]
+          properties:
+            event_type: { type: string, const: PaymentFailed }
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PaymentDetails'
+                - type: object
+                  required: [failure_code]
+                  properties:
+                    failure_code: { type: string, minLength: 1 }
+    RefundSucceededPayload:
+      allOf:
+        - $ref: '#/components/schemas/EventMetadata'
+        - type: object
+          required: [data]
+          properties:
+            event_type: { type: string, const: RefundSucceeded }
+            data: { $ref: '#/components/schemas/RefundDetails' }
+    RefundFailedPayload:
+      allOf:
+        - $ref: '#/components/schemas/EventMetadata'
+        - type: object
+          required: [data]
+          properties:
+            event_type: { type: string, const: RefundFailed }
+            data:
+              allOf:
+                - $ref: '#/components/schemas/RefundDetails'
+                - type: object
+                  required: [failure_code]
+                  properties:
+                    failure_code: { type: string, minLength: 1 }

@@ -1,0 +1,178 @@
+openapi: 3.0.3
+info:
+  title: External Payment Provider Contract (Mock)
+  version: 1.0.0
+  description: |
+    Минимальный контракт внешнего платёжного провайдера для учебной части 2.
+    В настоящей эксплуатации вместо имитатора используется API конкретного
+    провайдера и отдельный адаптер внутри Payment Service.
+    Ключ идемпотентности обязателен; поиск по operation_id доступен даже
+    после потери ответа на создание операции.
+servers:
+  - url: http://payment-provider-mock:8080/api/v1
+    description: Учебный имитатор
+security:
+  - providerToken: []
+tags:
+  - name: Charges
+  - name: Refunds
+paths:
+  /charges:
+    post:
+      tags: [Charges]
+      operationId: createCharge
+      summary: Создать идемпотентную операцию списания
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChargeRequest' }
+      responses:
+        '202':
+          description: Провайдер принял операцию; итог может появиться позднее
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Charge' }
+        '200':
+          description: Повторная команда с тем же ключом; не повторное списание
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Charge' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /charges/by-operation/{operationId}:
+    get:
+      tags: [Charges]
+      operationId: getChargeByOperation
+      summary: Установить результат списания при потере ответа или webhook
+      parameters: [{ $ref: '#/components/parameters/OperationId' }]
+      responses:
+        '200':
+          description: Текущий результат операции
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Charge' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /charges/{chargeId}/refunds:
+    post:
+      tags: [Refunds]
+      operationId: createRefund
+      summary: Создать полный возврат успешного списания
+      parameters:
+        - $ref: '#/components/parameters/ChargeId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefundRequest' }
+      responses:
+        '202':
+          description: Возврат выполняется
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Refund' }
+        '200':
+          description: Повтор — ранее созданный возврат
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Refund' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /refunds/by-operation/{operationId}:
+    get:
+      tags: [Refunds]
+      operationId: getProviderRefundByOperation
+      summary: Сверить результат возврата по устойчивому идентификатору
+      parameters: [{ $ref: '#/components/parameters/OperationId' }]
+      responses:
+        '200':
+          description: Результат возврата
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Refund' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+components:
+  securitySchemes:
+    providerToken:
+      type: http
+      scheme: bearer
+  parameters:
+    OperationId:
+      name: operationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ChargeId:
+      name: chargeId
+      in: path
+      required: true
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    ChargeRequest:
+      type: object
+      additionalProperties: false
+      required: [operation_id, order_id, amount_minor, currency]
+      properties:
+        operation_id: { type: string, format: uuid }
+        order_id: { type: string, format: uuid }
+        amount_minor: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, enum: [RUB] }
+    Charge:
+      type: object
+      required: [operation_id, order_id, amount_minor, currency, status]
+      properties:
+        provider_charge_id: { type: string, nullable: true }
+        operation_id: { type: string, format: uuid }
+        order_id: { type: string, format: uuid }
+        amount_minor: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, enum: [RUB] }
+        status: { type: string, enum: [PENDING, SUCCEEDED, FAILED] }
+    RefundRequest:
+      type: object
+      additionalProperties: false
+      required: [operation_id]
+      properties:
+        operation_id: { type: string, format: uuid }
+    Refund:
+      type: object
+      required: [operation_id, provider_charge_id, amount_minor, currency, status]
+      properties:
+        provider_refund_id: { type: string, nullable: true }
+        operation_id: { type: string, format: uuid }
+        provider_charge_id: { type: string }
+        amount_minor: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, enum: [RUB] }
+        status: { type: string, enum: [PENDING, SUCCEEDED, FAILED] }
+    Problem:
+      type: object
+      required: [code, message, retryable]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        retryable: { type: boolean }
+  responses:
+    Conflict:
+      description: Ключ использован для другой операции или недопустимый повторный возврат
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Неизвестная операция / списание
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unavailable:
+      description: Провайдер временно недоступен, итог операции нельзя считать FAILED
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }

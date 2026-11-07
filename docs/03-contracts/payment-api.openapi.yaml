@@ -1,0 +1,271 @@
+openapi: 3.0.3
+info:
+  title: Ticket Platform - Payment Service API
+  version: 1.0.0
+  description: |
+    Внутренний API Payment Service для Order Service и входящих подписанных
+    уведомлений платёжного провайдера. Результат платежа фиксируется только
+    после проверки у провайдера; отсутствие ответа не является отказом.
+servers:
+  - url: http://payment-service:8080/api/v1
+    description: Внутренняя сеть Docker Compose
+tags:
+  - name: Payments
+  - name: Refunds
+  - name: Provider Webhooks
+paths:
+  /payments:
+    post:
+      tags: [Payments]
+      operationId: initiatePayment
+      security: [{ serviceBearer: [] }]
+      summary: Запустить единственное списание для составного заказа
+      description: |
+        Idempotency-Key и operation_id остаются неизменными при сетевых повторах.
+        Payment Service использует тот же устойчивый ключ при обращении к
+        провайдеру и сохраняет платеж в своей БД до сетевого вызова.
+        Ответ 202 означает PENDING, а не факт списания.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePaymentRequest' }
+            example:
+              operation_id: 59708052-80cb-4b94-a4ee-32408c3972dc
+              order_id: 5dfc83b6-3859-4aa9-aa65-f868c7d2ca0f
+              amount_minor: 250000
+              currency: RUB
+      responses:
+        '202':
+          description: Платёж принят и ещё не установлен его окончательный результат
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '200':
+          description: Безопасный повтор возвращает прежний результат
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /payments/{paymentId}:
+    get:
+      tags: [Payments]
+      operationId: getPayment
+      security: [{ serviceBearer: [] }]
+      summary: Проверить текущий результат списания
+      parameters: [{ $ref: '#/components/parameters/PaymentId' }]
+      responses:
+        '200':
+          description: Локальное проверенное состояние платежа
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /payments/by-operation/{operationId}:
+    get:
+      tags: [Payments]
+      operationId: getPaymentByOperation
+      security: [{ serviceBearer: [] }]
+      summary: Найти платёж по неизменному ID команды, даже если ответ на POST потерян
+      parameters: [{ $ref: '#/components/parameters/OperationId' }]
+      responses:
+        '200':
+          description: Найден платёж и его результат
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /payments/{paymentId}/refunds:
+    post:
+      tags: [Refunds]
+      operationId: initiateFullRefund
+      security: [{ serviceBearer: [] }]
+      summary: Инициировать полный возврат платежа по заказу
+      description: |
+        MVP поддерживает только полный возврат подтверждённого списания.
+        Запрос с теми же operation_id и Idempotency-Key не создаёт повторного
+        возврата. Возврат завершён только при статусе SUCCEEDED у провайдера.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRefundRequest' }
+      responses:
+        '202':
+          description: Запрос принят; результат ещё неизвестен
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Refund' }
+        '200':
+          description: Повтор возвращает исходный результат
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Refund' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /refunds/by-operation/{operationId}:
+    get:
+      tags: [Refunds]
+      operationId: getRefundByOperation
+      security: [{ serviceBearer: [] }]
+      summary: Проверить возврат по ID операции после таймаута
+      parameters: [{ $ref: '#/components/parameters/OperationId' }]
+      responses:
+        '200':
+          description: Текущий статус возврата
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Refund' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /provider-webhooks/transactions:
+    post:
+      tags: [Provider Webhooks]
+      operationId: receiveProviderWebhook
+      security: [{ providerSignature: [] }]
+      summary: Получить подписанное уведомление провайдера
+      description: |
+        Сначала проверяется HMAC-подпись над исходным телом запроса,
+        затем дедупликация по provider_event_id и сверка с провайдером.
+        Повторное уведомление не создаёт повторный платёж, возврат или событие.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProviderWebhook' }
+      responses:
+        '200':
+          description: Событие принято или уже было обработано
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted]
+                properties:
+                  accepted: { type: boolean, enum: [true] }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+components:
+  securitySchemes:
+    serviceBearer:
+      type: http
+      scheme: bearer
+      description: Внутренний сервисный токен, не передаётся из браузера
+    providerSignature:
+      type: apiKey
+      in: header
+      name: X-Provider-Signature
+      description: HMAC-SHA256 от необработанного тела, проверяется по секрету провайдера
+  parameters:
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    OperationId:
+      name: operationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    CreatePaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [operation_id, order_id, amount_minor, currency]
+      properties:
+        operation_id: { type: string, format: uuid }
+        order_id: { type: string, format: uuid }
+        amount_minor: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, enum: [RUB] }
+    Payment:
+      type: object
+      required: [payment_id, operation_id, order_id, amount_minor, currency, status]
+      properties:
+        payment_id: { type: string, format: uuid }
+        operation_id: { type: string, format: uuid }
+        order_id: { type: string, format: uuid }
+        amount_minor: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, enum: [RUB] }
+        status:
+          type: string
+          enum: [PENDING, SUCCEEDED, FAILED]
+          description: PENDING означает в том числе временно неизвестный результат
+        provider_charge_id: { type: string, nullable: true }
+        failure_code: { type: string, nullable: true }
+    CreateRefundRequest:
+      type: object
+      additionalProperties: false
+      required: [operation_id, order_id]
+      properties:
+        operation_id: { type: string, format: uuid }
+        order_id: { type: string, format: uuid }
+    Refund:
+      type: object
+      required: [refund_id, operation_id, payment_id, order_id, amount_minor, currency, status]
+      properties:
+        refund_id: { type: string, format: uuid }
+        operation_id: { type: string, format: uuid }
+        payment_id: { type: string, format: uuid }
+        order_id: { type: string, format: uuid }
+        amount_minor: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, enum: [RUB] }
+        status: { type: string, enum: [PENDING, SUCCEEDED, FAILED] }
+        failure_code: { type: string, nullable: true }
+    ProviderWebhook:
+      type: object
+      additionalProperties: false
+      required: [provider_event_id, provider_operation_id, entity_type, status, occurred_at]
+      properties:
+        provider_event_id: { type: string, minLength: 1 }
+        provider_operation_id:
+          type: string
+          format: uuid
+          description: Исходная idempotent-команда списания либо возврата
+        entity_type: { type: string, enum: [CHARGE, REFUND] }
+        status: { type: string, enum: [SUCCEEDED, FAILED] }
+        provider_entity_id: { type: string, nullable: true }
+        occurred_at: { type: string, format: date-time }
+    Problem:
+      type: object
+      required: [code, message, retryable]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        retryable: { type: boolean }
+  responses:
+    BadRequest:
+      description: Ошибка формата уведомления
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Ошибка авторизации или неверная подпись webhook
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Идемпотентный ключ использован с другими данными либо состояние не допускает возврат
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unprocessable:
+      description: Невалидная сумма или несогласованность order_id
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Операция ещё не известна или идентификатор не найден
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
